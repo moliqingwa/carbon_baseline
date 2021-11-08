@@ -1,0 +1,7 @@
+torch==1.10.0
+tensorboardX==2.2
+numpy==1.21.3
+termtables==0.2.4
+easydict==1.9
+timer==0.2.2
+
