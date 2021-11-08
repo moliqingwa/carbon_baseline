@@ -134,9 +134,12 @@ class CarbonGameRunner:
 
         self.policy = Policy(cfg)
 
-    def run(self):
+        self.selfplay = True
+        self.best_model = None
+        self.best_model_filename = None
 
-        self._env_output = self.env.reset()
+    def run(self):
+        self._env_output = self.env.reset(self.selfplay)
         self.trajectory_buffer.reset()
 
         for episode in range(self.episodes):

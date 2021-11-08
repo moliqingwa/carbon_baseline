@@ -8,7 +8,7 @@ from algorithms.model import ActorNet, CriticNet
 class TestModel:
 
     def test_critic_net(self):
-        critic_net = CriticNet(False, None)
+        critic_net = CriticNet()
         print(critic_net)
 
         num_agents = 5

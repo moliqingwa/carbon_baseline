@@ -1,6 +1,7 @@
-from typing import Dict, AnyStr, Union, Tuple
+from typing import Dict, AnyStr, Union, Tuple, List
 from collections import defaultdict
 from easydict import EasyDict
+import copy
 
 import numpy as np
 import gym
@@ -59,29 +60,62 @@ class CarbonTrainerEnv:
     def observation_vector_shape(self) -> int:
         return 8
 
+    @property
+    def observation_dim(self) -> int:
+        return 8 + 13 * 15 * 15
+
     def reset(self, players=None):
         self.previous_action.clear()
 
-        raw_obs = self._env.reset(players)
-        self.previous_obs = None
-        self.current_obs = Board(raw_obs, self.configuration)
+        self._env.reset(players)
+        if self._env.my_index == 0:  # 当前轮次
+            my_state, opponent_state = self._env.env.steps[-1]
+        else:
+            opponent_state, my_state = self._env.env.steps[-1]
 
-        local_obs, dones, available_actions = self._obs_transform(self.current_obs)
+        self.previous_obs = None
+        self.current_obs = Board(my_state.observation, self.configuration)
+
+        local_obs, dones, available_actions = self._obs_transform(self.current_obs, None)
 
         output = EasyDict({'agent_id': [], 'obs': [], 'available_actions': []})
         for agent_name, obs in local_obs.items():
             output['agent_id'].append(agent_name)
             output['obs'].append(obs)
             output['available_actions'].append(available_actions[agent_name])
-            return output
 
-    def step(self, action: dict):
-        self.previous_action = action
+        if self._env.selfplay:
+            for key in set(my_state.observation.keys()) - set(opponent_state.observation.keys()):
+                opponent_state.observation[key] = my_state.observation[key]
+            opponent_obs = Board(opponent_state.observation, self.configuration)
+            opponent_local_obs, opponent_dones, opponent_available_actions = self._obs_transform(opponent_obs, None)
 
-        commands = {agent_name: self.agent_cmds[agent_name][cmd_value].name
-                    for agent_name, cmd_value in action.items() if cmd_value != 0}  # 0 is None, no need to send!
+            opponent_output = EasyDict({'agent_id': [], 'obs': [], 'available_actions': []})
+            for agent_name, obs in opponent_local_obs.items():
+                opponent_output['agent_id'].append(agent_name)
+                opponent_output['obs'].append(obs)
+                opponent_output['available_actions'].append(opponent_available_actions[agent_name])
+            output = [output, opponent_output]
+        return output
 
-        self._env.step([commands, None])
+    def step(self, actions: Tuple[dict, List[dict]]):
+        if isinstance(actions, list):
+            self.previous_action = {k: v for x in actions for k, v in x.items()}
+        else:
+            self.previous_action = copy.deepcopy(actions)
+            actions = [actions, None]
+
+        commands = []
+        for action in actions:
+            if action is None:
+                command = None
+            else:
+                command = {agent_name: self.agent_cmds[agent_name][cmd_value].name
+                           for agent_name, cmd_value in action.items() if cmd_value != 0}  # 0 is None, no need to send!
+            commands.append(command)
+
+        self._env.step(commands)
+
         if self._env.my_index == 0:  # 当前轮次
             my_state, opponent_state = self._env.env.steps[-1]
         else:
@@ -114,13 +148,11 @@ class CarbonTrainerEnv:
             agent_carbon_reward = agent_reward_dict.get(agent_id, {}).get('carbon', 0)  # 捕碳并运回家的奖励
             agent_reward = agent_tree_reward + agent_carbon_reward
 
-            if not env_done and agent_done:  # agent已消失
-                reward = extra_reward
-            else:
-                ratio = raw_obs.step / (self.max_step - 1)  # 步数权重(越到后期,权重越高)
-                reward = (1 - int(env_done)) * (1 - ratio) * agent_reward + ratio * env_reward
-                if reward == 0:
-                    reward = -0.1
+            ratio = raw_obs.step / (self.max_step - 1)  # 步数权重(越到后期,权重越高)
+            env_reward = env_reward if env_done else extra_reward
+            reward = (1 - int(env_done)) * (1 - ratio) * agent_reward + ratio * env_reward
+            if reward == 0:
+                reward = -0.1
 
             output['reward'].append(reward)
             output['info'].append({})
@@ -163,7 +195,8 @@ class CarbonTrainerEnv:
             agent_reward_dict[None]['tree'] = tree_without_owner_reward
 
             # 上一轮次
-            _, _, previous_my_workers, previous_my_trees = previous_my_state["observation"]["players"][self._env.my_index]
+            _, _, previous_my_workers, previous_my_trees = previous_my_state["observation"]["players"][
+                self._env.my_index]
             # 当前轮次
             _, my_bases, my_workers, my_trees = my_state.observation["players"][self._env.my_index]
             my_base_pos = next(iter(my_bases.values()))
@@ -185,9 +218,9 @@ class CarbonTrainerEnv:
 
         return self._normalize_reward(env_reward), agent_reward_dict
 
-    def _obs_transform(self, obs: Board):
+    def _obs_transform(self, obs: Board, previous_obs: Board = None):
         # 加入对手agent上一轮次的动作
-        opponent_cmds = self._guess_opponent_previous_actions(self.previous_obs, self.current_obs)
+        opponent_cmds = self._guess_opponent_previous_actions(previous_obs, obs)
         self.previous_action.update({k: v.value if v is not None else 0
                                      for k, v in opponent_cmds.items()})
 
@@ -205,13 +238,13 @@ class CarbonTrainerEnv:
         planter_feature = np.zeros_like(carbon_feature, dtype=np.float32)  # me: +1; opponent: -1
         worker_carbon_feature = np.zeros_like(carbon_feature, dtype=np.float32)
         tree_feature = np.zeros_like(carbon_feature, dtype=np.float32)  # trees, me: +; opponent: -.
-        action_feature = np.zeros((self.grid_size, self.grid_size, 5), dtype=np.float32)  # TODO
+        action_feature = np.zeros((self.grid_size, self.grid_size, self.act_space.n), dtype=np.float32)
 
         my_base_distance_feature = None
         distance_features = {}
 
-        my_cash, opponent_cash = self.current_obs.current_player.cash, self.current_obs.opponents[0].cash
-        for base_id, base in self.current_obs.recrtCenters.items():
+        my_cash, opponent_cash = obs.current_player.cash, obs.opponents[0].cash
+        for base_id, base in obs.recrtCenters.items():
             is_myself = base.player_id == my_player_id
 
             base_x, base_y = base.position.x, base.position.y
@@ -220,14 +253,14 @@ class CarbonTrainerEnv:
             base_distance_feature = self._distance_feature(base_x, base_y) / (self.grid_size - 1)
             distance_features[base_id] = base_distance_feature
 
-            action_feature[base_x, base_y] = one_hot_np(self.previous_action.get(base_id, 0), 5)  # TODO: 5
+            action_feature[base_x, base_y] = one_hot_np(self.previous_action.get(base_id, 0), self.act_space.n)
             if is_myself:
                 available_actions[base_id] = np.array([1, 1, 1, 0, 0])  # TODO
                 self.agent_cmds[base_id] = BaseActions
 
                 my_base_distance_feature = distance_features[base_id]
 
-        for worker_id, worker in self.current_obs.workers.items():
+        for worker_id, worker in obs.workers.items():
             is_myself = worker.player_id == my_player_id
 
             available_actions[worker_id] = np.array([1, 1, 1, 1, 1])  # TODO
@@ -236,7 +269,7 @@ class CarbonTrainerEnv:
             worker_x, worker_y = worker.position.x, worker.position.y
             distance_features[worker_id] = self._distance_feature(worker_x, worker_y) / (self.grid_size - 1)
 
-            action_feature[worker_x, worker_y] = one_hot_np(self.previous_action.get(worker_id, 0), 5)  # TODO: 5
+            action_feature[worker_x, worker_y] = one_hot_np(self.previous_action.get(worker_id, 0), self.act_space.n)
 
             if worker.is_collector:
                 collector_feature[worker_x, worker_y] = 1.0 if is_myself else -1.0
@@ -244,15 +277,15 @@ class CarbonTrainerEnv:
                 planter_feature[worker_x, worker_y] = 1.0 if is_myself else -1.0
 
             worker_carbon_feature[worker_x, worker_y] = worker.carbon
-        worker_carbon_feature /= self.configuration.maxCellCarbon
+        worker_carbon_feature = np.clip(worker_carbon_feature / self.configuration.maxCellCarbon / 2, -1, 1)
 
-        for tree in self.current_obs.trees.values():
+        for tree in obs.trees.values():
             tree_feature[tree.position.x, tree.position.y] = tree.age if tree.player_id == my_player_id else -tree.age
         tree_feature /= self.configuration.treeLifespan
 
         global_vector_feature = np.stack([step_feature,
-                                          np.clip(my_cash / 1000., -1., 1.),
-                                          np.clip(opponent_cash / 100., -1., 1.),
+                                          np.clip(my_cash / 2000., -1., 1.),
+                                          np.clip(opponent_cash / 2000., -1., 1.),
                                           ]).astype(np.float32)
         global_cnn_feature = np.stack([carbon_feature,
                                        base_feature,
@@ -265,17 +298,16 @@ class CarbonTrainerEnv:
 
         dones = {}
         local_obs = {}
-        previous_worker_ids = set() if self.previous_obs is None else set(
-            self.previous_obs.current_player.worker_ids)
-        worker_ids = set(self.current_obs.current_player.worker_ids)
+        previous_worker_ids = set() if previous_obs is None else set(previous_obs.current_player.worker_ids)
+        worker_ids = set(obs.current_player.worker_ids)
         new_worker_ids, death_worker_ids = worker_ids - previous_worker_ids, previous_worker_ids - worker_ids
-        obs = self.previous_obs if self.previous_obs is not None else self.current_obs
+        obs = previous_obs if previous_obs is not None else obs
         total_agents = obs.current_player.recrtCenters + \
                        obs.current_player.workers + \
-                       [self.current_obs.workers[id_] for id_ in new_worker_ids]  # 基地 + prev_workers + new_workers
+                       [obs.workers[id_] for id_ in new_worker_ids]  # 基地 + prev_workers + new_workers
         for my_agent in total_agents:
             if my_agent.id in death_worker_ids:  # 死亡的agent, 直接赋值为0
-                local_obs[my_agent.id] = np.zeros(2933, dtype=np.float32)  # TODO
+                local_obs[my_agent.id] = np.zeros(self.observation_dim, dtype=np.float32)
                 available_actions[my_agent.id] = np.array([1, 1, 1, 1, 1])  # TODO
                 dones[my_agent.id] = True
             else:  # 未死亡的agent
