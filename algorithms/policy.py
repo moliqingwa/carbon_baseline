@@ -20,6 +20,12 @@ class Policy:
         self.actor_optimizer = optim.AdamW(self.actor_model.parameters(), lr=self.learning_rate)
         self.critic_optimizer = optim.AdamW(self.critic_model.parameters(), lr=self.learning_rate)
 
+    def policy_reset(self):
+        pass
+
+    def can_sample_trajectory(self):
+        return True
+
     def lr_decay(self, episode, episodes):
         """
         Decay the actor and critic learning rates.
@@ -45,7 +51,7 @@ class Policy:
         action_logits = self.actor_model(obs)
         if available_actions is not None:
             available_actions = to_tensor(available_actions).to(**self.tensor_kwargs)
-            action_logits[available_actions == 0] = -1e10
+            action_logits[available_actions == 0] = torch.finfo(torch.float32).min
 
         dist = Categorical(logits=action_logits)
         action = dist.sample()
@@ -64,7 +70,7 @@ class Policy:
         action_logits = self.actor_model(obs)
         if available_actions is not None:
             available_actions = to_tensor(available_actions).to(**self.tensor_kwargs)
-            action_logits[available_actions == 0] = -1e10
+            action_logits[available_actions == 0] = torch.finfo(torch.float32).min
 
         dist = Categorical(logits=action_logits)
         # action = dist.sample()

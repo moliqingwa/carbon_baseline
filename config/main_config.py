@@ -9,6 +9,7 @@ config = dict(
 
     ),
     envs=dict(  # 训练Env
+        experient_name='runs',
         n_threads=1,
         seed=1,
     ),

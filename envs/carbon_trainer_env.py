@@ -124,6 +124,7 @@ class CarbonTrainerEnv:
         self.current_obs = Board(my_state.observation, self.configuration)
 
         my_output = self._output_per_player(my_state, opponent_state, self.current_obs, self.previous_obs)
+        # self._dump_state_and_rewards(my_output, my_state)  # 仅单进程测试使用!
 
         if self._env.selfplay:
             self.previous_opponent_obs = self.current_opponent_obs
@@ -140,12 +141,12 @@ class CarbonTrainerEnv:
         env_done = my_state.status != "ACTIVE"
 
         if not reset:  # 计算reward
-            env_reward, agent_reward_dict = self._calculate_reward(my_state, opponent_state)
+            raw_env_reward, agent_reward_dict = self._calculate_reward(my_state, opponent_state)
             alive_agent_total_reward = sum([v.get('tree', 0) + v.get('carbon', 0)
                                             for v in agent_reward_dict.values()])  # 所有活着的agent的总奖励
             extra_tree_reward = agent_reward_dict.get(None, {}).get('tree', 0)  # 无主之树的奖励
             # 碰撞,被自己树/转化中心直接吸收奖励(碰撞后,agent可能活着,也可能死亡) TODO: 区分哪个agent带来的 ???
-            extra_reward = round(env_reward - extra_tree_reward - alive_agent_total_reward, 5)  # env_reward: 可正可负(招聘)!!
+            extra_reward = round(raw_env_reward - extra_tree_reward - alive_agent_total_reward, 5)  # env_reward: 可正可负(招聘)!!
 
         agent_obs, dones, available_actions = self._obs_transform(current_obs, previous_obs)
 
@@ -164,10 +165,12 @@ class CarbonTrainerEnv:
                 agent_reward = agent_tree_reward + agent_carbon_reward
 
                 ratio = my_state.observation['step'] / (self.max_step - 1)  # 步数权重(越到后期,权重越高)
-                env_reward = env_reward if env_done else extra_reward
+                env_reward = raw_env_reward if env_done else extra_reward
                 reward = (1 - int(env_done)) * (1 - ratio) * agent_reward + ratio * env_reward
-                if reward == 0:
-                    reward = -0.1
+                if 'recrtCenter' in agent_id:  # TODO: hack here to check is the base or not
+                    reward = raw_env_reward  # 转化中心因无法产生直接收益,因此使用整体对手的奖励
+                elif reward == 0:
+                    reward = -0.0034
                 output['reward'].append(reward)
 
             output['info'].append({})
@@ -404,3 +407,34 @@ class CarbonTrainerEnv:
 
     def _normalize_reward(self, reward):
         return np.clip(reward / self.max_step, -1, 1)
+
+    def _dump_state_and_rewards(self, my_output, my_state):
+        """
+        保存游戏整个state和reward到文本文件中,方便事后分析使用 (仅单进程环境下使用)
+
+        :param my_output:
+        :param my_state:
+        :return:
+        """
+        with open("rewards.txt", 'a', encoding='utf-8') as f:
+            f.write("\n")
+            f.write(f"=== STEP: {self.current_obs.step} ===\n")
+            f.write(self.current_obs.__str__())
+            f.write("\n")
+            rewards = {k: round(v, 3) for k, v in zip(my_output['agent_id'], my_output['reward'])}
+            f.write(f"{rewards}\n")
+            if any([r > 0 for r in rewards.values()]):
+                print(my_state.observation.step)
+
+        if all(my_output['done']):
+            import json
+            with open("episode.txt", "w", encoding='utf-8') as f:
+                for step in self._env.env.steps:
+                    f.write(json.dumps(step) + "\n")
+
+            import os
+            try:
+                os.rename("rewards.txt", "rewards_archive.txt")
+            except:
+                pass
+

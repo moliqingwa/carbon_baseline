@@ -1,12 +1,7 @@
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union, Any, AnyStr
-import numbers
-import random
-import copy
-from collections import defaultdict, namedtuple
+from typing import Dict, List, Tuple, Any, AnyStr
+import os
+from collections import defaultdict
 from easydict import EasyDict
-
-import copy
-import time
 
 import numpy as np
 import torch
@@ -14,113 +9,12 @@ import torch.nn.functional as F
 
 from timer import timer
 
-from utils.dictlist import DictList
-from utils.utils import calculate_gard_norm
-from scripts.runner.replay_buffer import ReplayBuffer
+from utils.utils import calculate_gard_norm, synthesize
+from utils.trajectory_buffer import TrajectoryBuffer
+from utils.replay_buffer import ReplayBuffer
+
 from algorithms.policy import Policy
-
-
-class RingBuffer:
-    """ class that implements a not-yet-full buffer """
-
-    def __init__(self, max_size):
-        self.max = max_size
-        self.data = []
-
-    class __Full:
-        """ class that implements a full buffer """
-
-        def append(self, x):
-            """ Append an element overwriting the oldest one. """
-            self.data[self.cur] = x
-            self.cur = (self.cur + 1) % self.max
-
-        def get(self):
-            """ return list of elements in correct order """
-            ret = self.data[self.cur:] + self.data[:self.cur]
-            return ret
-
-        def last(self):
-            return self.data[self.cur - 1] if self.cur > 0 else self.data[-1]
-
-        def reset(self):
-            self.cur = 0
-            self.data.clear()
-            self.__class__ = RingBuffer
-
-    def append(self, x):
-        """append an element at the end of the buffer"""
-        self.data.append(x)
-        if len(self.data) == self.max:
-            self.cur = 0
-            # Permanently change self's class from non-full to full
-            self.__class__ = self.__Full
-
-    def get(self):
-        """ Return a list of elements from the oldest to the newest. """
-        return self.data
-
-    def last(self):
-        return self.data[-1]
-
-    def reset(self):
-        self.cur = 0
-        self.data.clear()
-
-
-class TrajectoryBuffer:
-    def __init__(self, n_envs: int, episode_length: int):
-        self.n_envs = n_envs
-        self.episode_length = episode_length
-
-        self.env_agent_ids = {id_: set() for id_ in range(self.n_envs)}
-        self.data = dict()  # eg. key -> env -> agent -> [step1, step2, ...]
-
-    def get_env_data(self, env_id: int, agent_first: bool = True, rollover_agent_ids=None) -> Dict[
-        AnyStr, Dict[AnyStr, List[Any]]]:
-        rollover_agent_ids = set() if rollover_agent_ids is None else set(rollover_agent_ids)
-
-        return_value = {}
-
-        for key, env_data in self.data.items():  # data: {key: env_id, value: {agent_id: agent's step values}}
-            for agent_id, values in env_data[env_id].items():
-                first_key, second_key = (agent_id, key) if agent_first else (key, agent_id)
-                if first_key not in return_value:
-                    return_value[first_key] = {}
-
-                values = copy.deepcopy(values.get())
-                return_value[first_key][second_key] = np.array(values, dtype=np.float32)
-
-                if agent_id in rollover_agent_ids:
-                    env_data[env_id][agent_id].reset()
-                    env_data[env_id][agent_id].append(values[-1])
-
-        self.env_agent_ids[env_id].clear()
-        for env_data in self.data.values():
-            env_data[env_id] = {agent_id: value for agent_id, value in env_data[env_id].items()
-                                if agent_id in rollover_agent_ids}
-            self.env_agent_ids[env_id] = set(env_data[env_id].keys())
-
-        return return_value
-
-    def append(self, key: str, env_id: int, agent_id: str, value: Any):
-        if key not in self.data:
-            self.data[key] = {env_id: {} for env_id in range(self.n_envs)}
-
-        if agent_id not in self.data[key][env_id]:
-            self.data[key][env_id][agent_id] = RingBuffer(self.episode_length + 1)
-
-        # 添加数据
-        self.data[key][env_id][agent_id].append(value)
-        self.env_agent_ids[env_id].add(agent_id)
-
-    def contains_agent(self, env_id, agent_id: str):
-        return agent_id in self.env_agent_ids[env_id]
-
-    def reset(self):
-        self.data.clear()
-        for values in self.env_agent_ids.values():
-            values.clear()
+from algorithms.training_partner_policy import TrainingPartnerPolicy
 
 
 class CarbonGameRunner:
@@ -138,47 +32,53 @@ class CarbonGameRunner:
         self.value_loss_coef = cfg.main_config.runner.value_loss_coef
         self.actor_max_grad_norm = cfg.main_config.runner.actor_max_grad_norm
         self.critic_max_grad_norm = cfg.main_config.runner.critic_max_grad_norm
+        self.save_interval = 10  # TODO
+        self.save_model_dir = cfg.run_dir / "models"
 
-        self._my_env_output = None
-        self.trajectory_buffer = TrajectoryBuffer(self.n_threads, self.episode_length)
+        self.env_output = None
+        self.trajectory_buffer = TrajectoryBuffer()
         self._replay_buffer = ReplayBuffer(cfg.main_config.runner.replay_buffer)
 
-        self.policy = Policy(cfg)
+        self.learner_policy = Policy(cfg)  # 待训练的策略
 
         # 下面为selfplay的相关参数
         self.selfplay = True
-        self._opponent_env_output = None
+        self.partner_policy = TrainingPartnerPolicy(cfg, self.save_model_dir)  # 陪练机器人
+        self.policies = [self.learner_policy, self.partner_policy]
         self.best_model = None
         self.best_model_filename = None
 
     def run(self):
-        if self.selfplay:
-            self._my_env_output, self._opponent_env_output = self.env.reset(self.selfplay)
-        else:
-            self._my_env_output = self.env.reset(self.selfplay)
+        self.env_output = self.env.reset(self.selfplay)
 
         self.trajectory_buffer.reset()
 
+        per_agent_accumulate_reward = None  # 筛选最佳策略使用
         for episode in range(self.episodes):
             self.prep_rollout()
 
-            collect_logs = []
+            collect_logs = {}
             with timer() as t:
                 for step in range(self.episode_length):
                     new_data, collect_log = self.collect(step)
 
                     if new_data:  # add to replay buffer
                         self._replay_buffer.append(new_data)
-                        collect_logs.extend(collect_log)
-            collect_logs = {key: [d[key] for d in collect_logs] for key in collect_logs[0]}
-            collect_logs['collect_time'] = t.elapse
-            print(collect_logs)
 
+                        if not collect_logs:
+                            collect_logs = collect_log
+                        else:
+                            for key, value in collect_log.items():
+                                collect_logs[key].extend(value)
+            # collect_logs = {key: [d[key] for d in collect_logs] for key in collect_logs[0]}
+            collect_logs['collect_step_duration'] = [t.elapse / self.episode_length]
+            collect_logs = {k: np.mean(v) for k, v in collect_logs.items()}
+
+            train_logs = []
             should_train = True  # TODO
             if should_train:
                 self.prep_training()
 
-                train_logs = []
                 with timer() as t:
                     for _ in range(self.training_times):
                         batch_size = 256
@@ -188,113 +88,116 @@ class CarbonGameRunner:
                             start = i * batch_size
                             end = min(start + batch_size, len(self._replay_buffer))
                             train_data = self._replay_buffer.sample_batch_by_indices(np.arange(start, end))  # TODO
+
                             train_log = self.train(train_data)
+
                             train_logs.append(train_log)
-                train_log = {key: np.mean([d[key] for d in train_logs]) for key in train_logs[0]}
-                train_log['train_time'] = t.elapse
-                print(train_log)
+                train_logs = {key: np.mean([d[key] for d in train_logs]) for key in train_logs[0]}
+                train_logs['per_train_time'] = t.elapse / self.training_times
 
                 self._replay_buffer.reset()
 
-    def save_policy_to_trajectory_buffer(self, policy_output: Dict[int, Dict[AnyStr, EasyDict]]):
-        for env_id in range(self.n_threads):  # for each env
-            for agent_id, agent_value in policy_output[env_id].items():  # for each agent
-                for key, value in agent_value.items():  # S(t), a(t), V(t)
-                    self.trajectory_buffer.append(key, env_id, agent_id, value)
+            # print(collect_logs)
+            # print(train_logs)
+            log_value = f"E {episode}/{self.episodes} | " \
+                        f"C {collect_logs['alive_agent_count']:.0f}/{collect_logs['accumulate_agent_count']:.0f} | " \
+                        f"Win {collect_logs['win_count']:.0f}/{collect_logs['draw_count']:.0f}/" \
+                        f"{collect_logs['lose_count']:.0f} | " \
+                        f"R {collect_logs['per_agent_accumulate_reward']:.3f} || " \
+                        f"V {train_logs['value']:.3f} | " \
+                        f"aL {train_logs['actor_loss']:.3f} | vL {train_logs['critic_loss']:.3f} | " \
+                        f"∇:ac {train_logs['actor_grad_norm']:.3f} {train_logs['critic_grad_norm']:.3f} | " \
+                        f"H {train_logs['entropy']:.3f} | A {train_logs['advantage']:.3f} | " \
+                        f"kl {train_logs['approx_kl']:.3f} | r {train_logs['ratio']:.3f}"
+            print(log_value)
+            if per_agent_accumulate_reward is None or collect_logs['per_agent_accumulate_reward'] >= per_agent_accumulate_reward:
+                self.save(episode, is_best=True)
+                per_agent_accumulate_reward = collect_logs['per_agent_accumulate_reward']
 
-    def collect(self, step) -> Tuple[List[Dict[AnyStr, Dict[AnyStr, List[np.ndarray]]]], List[Dict[AnyStr, float]]]:
-        my_policy_output = self.get_actions_and_values(self._my_env_output)  # 我方策略输出
-        self.save_policy_to_trajectory_buffer(my_policy_output)
+            if episode % self.save_interval == 0 or episode == self.episodes - 1:
+                self.save(episode)
 
-        opponent_policy_output = None  # 对手策略输出
-        if self.selfplay:
-            opponent_policy_output = self.get_actions_and_values(self._opponent_env_output)  # TODO: use best model
-            self.save_policy_to_trajectory_buffer(opponent_policy_output)
-        
+    def collect(self, step) -> Tuple[List[Dict[AnyStr, Dict]], Dict[AnyStr, List]]:
+        env_outputs = self.env_output if self.selfplay else [self.env_output]
+
+        policy_outputs = []
+        for policy_id, env_output in enumerate(env_outputs):
+            policy_output = self.get_actions_and_values(policy_id, env_output)  # 策略输出( TODO: opponent use best model)
+            if self.policies[policy_id].can_sample_trajectory():
+                self.trajectory_buffer.add_policy_data(policy_id, policy_output)
+            policy_outputs.append(policy_output)
+        policy_outputs = {key: [d[key] for d in policy_outputs] for key in policy_outputs[0]}  # env first, then policy
+
         env_actions = []
         for env_id in range(self.n_threads):  # for each env
-            action = {agent_id: agent_value.action.item()
-                      for agent_id, agent_value in my_policy_output[env_id].items()}  # agent_id: command value
+            policy_output = policy_outputs[env_id]  #
 
-            if opponent_policy_output is not None:  # 自我对局
-                opponent_action = {agent_id: agent_value.action.item()
-                                   for agent_id, agent_value in opponent_policy_output[env_id].items()}
-                action = [action, opponent_action]
+            action = [{agent_id: agent_value.action.item() for agent_id, agent_value in output.items()}
+                      for output in policy_output]  # each policy: agent_id: command value
 
+            if len(action) == 1:  # not self-play
+                action = action[0]
             env_actions.append(action)
 
         # a(t) -> r(t), S(t+1), done(t+1)
-        if self.selfplay:
-            self._my_env_output, self._opponent_env_output = self.env.step(env_actions)
-        else:
-            self._my_env_output = self.env.step(env_actions)
+        raw_env_output = self.env.step(env_actions)
+        env_outputs = raw_env_output if self.selfplay else [raw_env_output]
+        for policy_id, env_output_ in enumerate(env_outputs):
+            if self.policies[policy_id].can_sample_trajectory():
+                self.trajectory_buffer.add_env_data(policy_id, env_output_)
 
-        return_data, collect_log = [], []
-        for env_id in range(self.n_threads):  # 遍历每个游戏环境,并收集trajectory
-            a_env_output_next = self._my_env_output[env_id]
-
-            env_reward = a_env_output_next.pop('env_reward')
-            a_env_output_next = copy.deepcopy(a_env_output_next)
-
-            # 因reset被移动到reserved_agent_id中,
-            agent_ids_next = a_env_output_next.pop('reserved_agent_id') if 'reserved_agent_id' in a_env_output_next \
-                else a_env_output_next.pop('agent_id')
-
-            # 处理t时刻
-            for i, agent_id in enumerate(agent_ids_next):
-                if not self.trajectory_buffer.contains_agent(env_id, agent_id):
+        return_data, collect_log = [], defaultdict(list)
+        done_env_ids = [env_id for env_id, env_output_ in enumerate(env_outputs[0])  # 选取第一个玩家,检查游戏结束状态
+                        if all(env_output_['done'])]
+        for env_id in done_env_ids:  # 若游戏结束,收集所有agent的数据,做训练
+            transitions = defaultdict(dict)
+            for policy_id, env_output_ in enumerate(env_outputs):
+                if not self.policies[policy_id].can_sample_trajectory():
                     continue
 
-                self.trajectory_buffer.append('done', env_id, agent_id,
-                                              a_env_output_next['done'][i])  # done(t+1)
-                self.trajectory_buffer.append('reward', env_id, agent_id,
-                                              a_env_output_next['reward'][i])  # r(t)
+                policy_data = self.trajectory_buffer.get_transitions(policy_id, env_id)
 
-            if self.selfplay:
-                opponent_env_output_next = self._opponent_env_output[env_id]
-                opponent_env_output_next = copy.deepcopy(opponent_env_output_next)
-                opponent_agent_ids_next = opponent_env_output_next.pop('reserved_agent_id') if 'reserved_agent_id' in opponent_env_output_next \
-                    else opponent_env_output_next.pop('agent_id')
+                agent_accumulate_reward, max_step = [], 0
+                for agent_id, trajectory_data in policy_data.items():
+                    returns = self.compute_returns(trajectory_data,
+                                                   next_value=0)  # TODO: use critic to estimate ???
+                    transitions[agent_id] = trajectory_data
+                    transitions[agent_id].update(returns)  # 添加R(t),Advantage(t)到transition中
 
-                for i, agent_id in enumerate(opponent_agent_ids_next):
-                    if not self.trajectory_buffer.contains_agent(env_id, agent_id):
-                        continue
-
-                    self.trajectory_buffer.append('done', env_id, agent_id,
-                                                  opponent_env_output_next['done'][i])  # done(t+1)
-                    self.trajectory_buffer.append('reward', env_id, agent_id,
-                                                  opponent_env_output_next['reward'][i])  # r(t)
-
-            if all(a_env_output_next['done']):  # 游戏结束(t=terminal),收集所有的transition序列,并返回
-                transitions = defaultdict(dict)
-                env_data = self.trajectory_buffer.get_env_data(env_id, agent_first=True,
-                                                               rollover_agent_ids=None)
-                assert all([v['done'][-1] == 1 for v in env_data.values()])
-                for agent_id, traj in env_data.items():
-                    # 添加到transition中
-                    for key, value in traj.items():
-                        transitions[agent_id][key] = np.array(value)
-                    returns = self.compute_returns(traj, next_value=0)
-                    transitions[agent_id].update(returns)
+                    agent_accumulate_reward.append(sum(trajectory_data['reward']))
+                    max_step = max(max_step, len(trajectory_data['reward']))
                 return_data.append(transitions)
 
-                collect_log.append(EasyDict({
-                    "alive_agent_count": len(agent_ids_next),
-                    "env_return": env_reward,
-                }))
+                if self.policies[policy_id] == self.learner_policy:  # 仅收集训练策略的统计数据
+                    collect_log['accumulate_agent_count'].append(len(policy_data))
+                    collect_log['alive_agent_count'].append(len(env_output_[env_id].get('reserved_agent_id',
+                                                                                        env_output_[env_id]['agent_id'])))
+                    collect_log['per_agent_accumulate_reward'].append(np.mean(agent_accumulate_reward))
+                    collect_log['env_return'].append(env_output_[env_id]['env_reward'])
+                    collect_log['step_duration'].append(max_step)
+                    is_win = env_output_[env_id]['env_reward'] > 0
+                    is_draw = env_output_[env_id]['env_reward'] == 0
+                    collect_log['win_count'].append(1 if is_win else 0)  # +1: win
+                    collect_log['draw_count'].append(1 if is_draw else 0)  # draw
+                    collect_log['lose_count'].append(1 if not is_win and not is_draw else 0)  # -1: lose
 
+        if 'win_count' in collect_log:
+            collect_log['win_count'] = [sum(collect_log['win_count'])]
+            collect_log['draw_count'] = [sum(collect_log['draw_count'])]
+            collect_log['lose_count'] = [sum(collect_log['lose_count'])]
+        self.env_output = raw_env_output
         return return_data, collect_log
 
-    def get_actions_and_values(self, env_output):
-        agent_ids, obs, available_actions = zip(*[(output['agent_id'],
-                                                   output['obs'],
-                                                   output['available_actions'])
+    def get_actions_and_values(self, policy_id: int, env_output):
+        agent_ids, obs, available_actions = zip(*[(output.get('reserved_agent_id', output['agent_id']),
+                                                   output.get('reserved_obs', output['obs']),
+                                                   output.get('reserved_available_actions', output['available_actions']))
                                                   for output in env_output])
         flatten_obs = [value for env_obs in obs for value in env_obs]
         flatten_obs_tensor = torch.from_numpy(np.stack(flatten_obs))
         flatten_available_actions = np.concatenate(available_actions)
 
-        policy_output = self.policy.get_actions_values(flatten_obs_tensor, flatten_available_actions)
+        policy_output = self.policies[policy_id].get_actions_values(flatten_obs_tensor, flatten_available_actions)
 
         flatten_action, flatten_log_prob, flatten_value = policy_output  # a(t), V(t)
 
@@ -313,7 +216,7 @@ class CarbonGameRunner:
         return output
 
     def train(self, batch: EasyDict) -> EasyDict:
-        log_prob, dist_entropy, value = self.policy.evaluate_actions(batch.obs, batch.action, batch.available_actions)
+        log_prob, dist_entropy, value = self.learner_policy.evaluate_actions(batch.obs, batch.action, batch.available_actions)
 
         # actor loss
         ratio = torch.exp(log_prob - batch.log_prob)
@@ -338,19 +241,19 @@ class CarbonGameRunner:
             approx_kl = torch.mean((torch.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
 
         # train
-        self.policy.actor_optimizer.zero_grad()
+        self.learner_policy.actor_optimizer.zero_grad()
         actor_loss.backward()
-        actor_grad_norm = calculate_gard_norm(self.policy.actor_model.parameters())
+        actor_grad_norm = calculate_gard_norm(self.learner_policy.actor_model.parameters())
         if self.actor_max_grad_norm is not None and self.actor_max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.policy.actor_model.parameters(), self.actor_max_grad_norm)
-        self.policy.actor_optimizer.step()
+            torch.nn.utils.clip_grad_norm_(self.learner_policy.actor_model.parameters(), self.actor_max_grad_norm)
+        self.learner_policy.actor_optimizer.step()
 
-        self.policy.critic_optimizer.zero_grad()
+        self.learner_policy.critic_optimizer.zero_grad()
         critic_loss.backward()
-        critic_grad_norm = calculate_gard_norm(self.policy.critic_model.parameters())
+        critic_grad_norm = calculate_gard_norm(self.learner_policy.critic_model.parameters())
         if self.critic_max_grad_norm is not None and self.critic_max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.policy.critic_model.parameters(), self.critic_max_grad_norm)
-        self.policy.critic_optimizer.step()
+            torch.nn.utils.clip_grad_norm_(self.learner_policy.critic_model.parameters(), self.critic_max_grad_norm)
+        self.learner_policy.critic_optimizer.step()
 
         # 返回统计情况
         output = EasyDict({
@@ -395,9 +298,19 @@ class CarbonGameRunner:
         return {"advantage": advantages, "return_": returns}
 
     def prep_training(self):
-        self.policy.actor_model.train()
-        self.policy.critic_model.train()
+        self.learner_policy.actor_model.train()
+        self.learner_policy.critic_model.train()
 
     def prep_rollout(self):
-        self.policy.actor_model.eval()
-        self.policy.critic_model.eval()
+        self.learner_policy.actor_model.eval()
+        self.learner_policy.critic_model.eval()
+
+        self.partner_policy.policy_reset()
+
+    def save(self, episode: int, is_best=False):
+        actor_name = f"actor_best.pth" if is_best else f"actor_{episode}.pth"
+        critic_name = f"critic_best.pth" if is_best else f"critic_{episode}.pth"
+        if not self.save_model_dir.exists():
+            os.makedirs(str(self.save_model_dir))
+        torch.save(self.learner_policy.actor_model.state_dict(), str(self.save_model_dir / actor_name))
+        torch.save(self.learner_policy.critic_model.state_dict(), str(self.save_model_dir / critic_name))
