@@ -101,8 +101,8 @@ class CarbonGameRunner:
             # print(train_logs)
             log_value = f"E {episode}/{self.episodes} | " \
                         f"C {collect_logs['alive_agent_count']:.0f}/{collect_logs['accumulate_agent_count']:.0f} | " \
-                        f"Win {collect_logs['win_count']:.0f}/{collect_logs['draw_count']:.0f}/" \
-                        f"{collect_logs['lose_count']:.0f} | " \
+                        f"WDL {collect_logs['win_count']:.1f}/{collect_logs['draw_count']:.1f}/" \
+                        f"{collect_logs['lose_count']:.1f} | " \
                         f"R {collect_logs['per_agent_accumulate_reward']:.3f} || " \
                         f"V {train_logs['value']:.3f} | " \
                         f"aL {train_logs['actor_loss']:.3f} | vL {train_logs['critic_loss']:.3f} | " \

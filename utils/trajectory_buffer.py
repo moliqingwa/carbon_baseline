@@ -20,6 +20,7 @@ class TrajectoryBuffer:
         :param env_id: 游戏环境ID
         :return: 每个agent对应的transition数据: S(t), a(t), logit(t), V(t), r(t), done(t+1)
         """
+        assert env_id in self.policy_data[policy_id]
         raw_policy_data = self.policy_data[policy_id].pop(env_id)  # 单个玩家某个并行环境下的数据
         # 将每个玩家的每个游戏环境下, 单个agent的数据 (过滤掉出生即死亡的agent, 仅有策略数据,没有环境数据)
         policy_data = {agent_id: {key: np.array(value[: len(agent_data['done'])], dtype=np.float32)
@@ -49,8 +50,11 @@ class TrajectoryBuffer:
                         env_buffer[env_id][agent_id][new_key] = [copy.deepcopy(new_value)]
             self.policy_data[policy_id] = env_buffer
         else:
-            for env_id, env_buffer in self.policy_data[policy_id].items():
-                new_data = policy_data[env_id]
+            for env_id, new_data in policy_data.items():
+                if env_id not in self.policy_data[policy_id]:  # env数据已经被取出,此时为空,需重新添加
+                    self.policy_data[policy_id][env_id] = {}
+
+                env_buffer = self.policy_data[policy_id][env_id]
                 for agent_id, agent_new_data in new_data.items():
                     if agent_id not in env_buffer:
                         env_buffer[agent_id] = {}

@@ -10,11 +10,11 @@ config = dict(
     ),
     envs=dict(  # 训练Env
         experient_name='runs',
-        n_threads=1,
+        n_threads=32,
         seed=1,
     ),
     runner=dict(  # 训练配置项
-        episodes=300,
+        episodes=10000,
         episode_length=300,
         training_times=15,
         replay_buffer=dict(size=10000,

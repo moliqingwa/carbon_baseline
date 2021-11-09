@@ -14,7 +14,7 @@ def worker(conn, env):
             #     obs = env.reset()
             conn.send(env_output)
         elif cmd == "reset":
-            env_output = env.reset()
+            env_output = env.reset(data)
             conn.send(env_output)
         else:
             raise NotImplementedError
@@ -47,7 +47,8 @@ class ParallelEnv(gym.Env):
         for local in self.locals:
             local.send(("reset", players))
         one_output = self.envs[0].reset(players)
-        total_outputs = [one_output] + [local.recv() for local in self.locals]
+        other_outputs = [local.recv() for local in self.locals]
+        total_outputs = [one_output] + other_outputs
 
         if self.selfplay:  # 拆分出player1, player2的数据
             total_outputs = [[v[i] for v in total_outputs] for i, _ in enumerate(total_outputs[0])]
