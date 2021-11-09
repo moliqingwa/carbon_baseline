@@ -38,6 +38,7 @@ class CarbonTrainerEnv:
         self.agent_cmds = {}
 
         self.previous_obs = self.current_obs = None  # 记录连续两帧 Observation
+        self.previous_opponent_obs = self.current_opponent_obs = None  # 记录对手连续两帧 Observation,仅在selfplay时使用
 
         self._env = CarbonEnv(cfg)
 
@@ -64,39 +65,40 @@ class CarbonTrainerEnv:
     def observation_dim(self) -> int:
         return 8 + 13 * 15 * 15
 
+    def _get_latest_state(self):
+        if self._env.my_index == 0:  # 当前轮次
+            my_state, opponent_state = self._env.env.steps[-1]
+
+            for key in set(my_state.observation.keys()) - set(opponent_state.observation.keys()):  # 复制公共属性
+                opponent_state.observation[key] = my_state.observation[key]
+        else:
+            opponent_state, my_state = self._env.env.steps[-1]
+
+            for key in set(opponent_state.observation.keys()) - set(my_state.observation.keys()):  # 复制公共属性
+                my_state.observation[key] = opponent_state.observation[key]
+        return my_state, opponent_state
+
     def reset(self, players=None):
         self.previous_action.clear()
 
         self._env.reset(players)
-        if self._env.my_index == 0:  # 当前轮次
-            my_state, opponent_state = self._env.env.steps[-1]
-        else:
-            opponent_state, my_state = self._env.env.steps[-1]
+        my_state, opponent_state = self._get_latest_state()
 
         self.previous_obs = None
         self.current_obs = Board(my_state.observation, self.configuration)
 
-        local_obs, dones, available_actions = self._obs_transform(self.current_obs, None)
+        my_output = self._output_per_player(my_state, opponent_state, self.current_obs, None,
+                                            reset=True)
 
-        output = EasyDict({'agent_id': [], 'obs': [], 'available_actions': []})
-        for agent_name, obs in local_obs.items():
-            output['agent_id'].append(agent_name)
-            output['obs'].append(obs)
-            output['available_actions'].append(available_actions[agent_name])
+        if self._env.selfplay:  # 自我对局
+            self.previous_opponent_obs = None
+            self.current_opponent_obs = Board(opponent_state.observation, self.configuration)
 
-        if self._env.selfplay:
-            for key in set(my_state.observation.keys()) - set(opponent_state.observation.keys()):
-                opponent_state.observation[key] = my_state.observation[key]
-            opponent_obs = Board(opponent_state.observation, self.configuration)
-            opponent_local_obs, opponent_dones, opponent_available_actions = self._obs_transform(opponent_obs, None)
-
-            opponent_output = EasyDict({'agent_id': [], 'obs': [], 'available_actions': []})
-            for agent_name, obs in opponent_local_obs.items():
-                opponent_output['agent_id'].append(agent_name)
-                opponent_output['obs'].append(obs)
-                opponent_output['available_actions'].append(opponent_available_actions[agent_name])
-            output = [output, opponent_output]
-        return output
+            opponent_output = self._output_per_player(opponent_state, my_state, self.current_opponent_obs, None,
+                                                      reset=True)
+            return [my_output, opponent_output]
+        else:
+            return my_output
 
     def step(self, actions: Tuple[dict, List[dict]]):
         if isinstance(actions, list):
@@ -116,48 +118,64 @@ class CarbonTrainerEnv:
 
         self._env.step(commands)
 
-        if self._env.my_index == 0:  # 当前轮次
-            my_state, opponent_state = self._env.env.steps[-1]
-        else:
-            opponent_state, my_state = self._env.env.steps[-1]
-        raw_obs = my_state.observation
-        env_done = my_state.status != "ACTIVE"
+        my_state, opponent_state = self._get_latest_state()  # 当前轮次
 
         self.previous_obs = self.current_obs
-        self.current_obs = Board(raw_obs, self.configuration)
+        self.current_obs = Board(my_state.observation, self.configuration)
 
-        env_reward, agent_reward_dict = self._calculate_reward(my_state, opponent_state)
-        alive_agent_total_reward = sum([v.get('tree', 0) + v.get('carbon', 0)
-                                        for v in agent_reward_dict.values()])  # 所有活着的agent的总奖励
-        extra_tree_reward = agent_reward_dict.get(None, {}).get('tree', 0)  # 无主之树的奖励
-        # 碰撞,被自己树/转化中心直接吸收奖励(碰撞后,agent可能活着,也可能死亡) TODO: 区分哪个agent带来的 ???
-        extra_reward = round(env_reward - extra_tree_reward - alive_agent_total_reward, 5)  # env_reward: 可正可负(招聘)!!
+        my_output = self._output_per_player(my_state, opponent_state, self.current_obs, self.previous_obs)
 
-        local_obs, dones, available_actions = self._obs_transform(self.current_obs)
+        if self._env.selfplay:
+            self.previous_opponent_obs = self.current_opponent_obs
+            self.current_opponent_obs = Board(opponent_state.observation, self.configuration)
 
-        output = EasyDict({'agent_id': [], 'obs': [], 'reward': [], 'done': [], 'info': [],
-                           'available_actions': [], 'env_reward': env_reward})
-        for agent_id, obs in local_obs.items():
+            opponent_output = self._output_per_player(opponent_state, my_state,
+                                                      self.current_opponent_obs, self.previous_opponent_obs)
+            return [my_output, opponent_output]
+        else:
+            return my_output
+
+    def _output_per_player(self, my_state, opponent_state, current_obs: Board, previous_obs: Board, *,
+                           reset=False):
+        env_done = my_state.status != "ACTIVE"
+
+        if not reset:  # 计算reward
+            env_reward, agent_reward_dict = self._calculate_reward(my_state, opponent_state)
+            alive_agent_total_reward = sum([v.get('tree', 0) + v.get('carbon', 0)
+                                            for v in agent_reward_dict.values()])  # 所有活着的agent的总奖励
+            extra_tree_reward = agent_reward_dict.get(None, {}).get('tree', 0)  # 无主之树的奖励
+            # 碰撞,被自己树/转化中心直接吸收奖励(碰撞后,agent可能活着,也可能死亡) TODO: 区分哪个agent带来的 ???
+            extra_reward = round(env_reward - extra_tree_reward - alive_agent_total_reward, 5)  # env_reward: 可正可负(招聘)!!
+
+        agent_obs, dones, available_actions = self._obs_transform(current_obs, previous_obs)
+
+        output = defaultdict(list)
+        for agent_id, obs in agent_obs.items():
             output['agent_id'].append(agent_id)
             output['obs'].append(obs)
-            agent_done = env_done | dones[agent_id]
-            output['done'].append(agent_done)
 
-            # 计算活着的agent本局的收益
-            agent_tree_reward = agent_reward_dict.get(agent_id, {}).get('tree', 0)  # 种树/抢树 带来的奖励(每轮)
-            agent_carbon_reward = agent_reward_dict.get(agent_id, {}).get('carbon', 0)  # 捕碳并运回家的奖励
-            agent_reward = agent_tree_reward + agent_carbon_reward
+            if not reset:
+                agent_done = env_done | dones[agent_id]  # 环境结束 或 agent结束
+                output['done'].append(agent_done)
 
-            ratio = raw_obs.step / (self.max_step - 1)  # 步数权重(越到后期,权重越高)
-            env_reward = env_reward if env_done else extra_reward
-            reward = (1 - int(env_done)) * (1 - ratio) * agent_reward + ratio * env_reward
-            if reward == 0:
-                reward = -0.1
+                # 计算活着的agent本局的收益
+                agent_tree_reward = agent_reward_dict.get(agent_id, {}).get('tree', 0)  # 种树/抢树 带来的奖励(每轮)
+                agent_carbon_reward = agent_reward_dict.get(agent_id, {}).get('carbon', 0)  # 捕碳并运回家的奖励
+                agent_reward = agent_tree_reward + agent_carbon_reward
 
-            output['reward'].append(reward)
+                ratio = my_state.observation['step'] / (self.max_step - 1)  # 步数权重(越到后期,权重越高)
+                env_reward = env_reward if env_done else extra_reward
+                reward = (1 - int(env_done)) * (1 - ratio) * agent_reward + ratio * env_reward
+                if reward == 0:
+                    reward = -0.1
+                output['reward'].append(reward)
+
             output['info'].append({})
             output['available_actions'].append(available_actions[agent_id])
-        return output
+
+        if not reset:
+            output['env_reward'] = env_reward
+        return dict(output)
 
     def close(self):
         pass
@@ -218,21 +236,21 @@ class CarbonTrainerEnv:
 
         return self._normalize_reward(env_reward), agent_reward_dict
 
-    def _obs_transform(self, obs: Board, previous_obs: Board = None):
+    def _obs_transform(self, current_obs: Board, previous_obs: Board = None):
         # 加入对手agent上一轮次的动作
-        opponent_cmds = self._guess_opponent_previous_actions(previous_obs, obs)
+        opponent_cmds = self._guess_opponent_previous_actions(previous_obs, current_obs)
         self.previous_action.update({k: v.value if v is not None else 0
                                      for k, v in opponent_cmds.items()})
 
         available_actions = {}
-        my_player_id = obs.current_player_id
+        my_player_id = current_obs.current_player_id
 
         carbon_feature = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        for point, cell in obs.cells.items():
+        for point, cell in current_obs.cells.items():
             if cell.carbon > 0:
                 carbon_feature[point.x, point.y] = cell.carbon / self.configuration.maxCellCarbon
 
-        step_feature = obs.step / (self.max_step - 1)
+        step_feature = current_obs.step / (self.max_step - 1)
         base_feature = np.zeros_like(carbon_feature, dtype=np.float32)  # me: +1; opponent: -1
         collector_feature = np.zeros_like(carbon_feature, dtype=np.float32)  # me: +1; opponent: -1
         planter_feature = np.zeros_like(carbon_feature, dtype=np.float32)  # me: +1; opponent: -1
@@ -243,8 +261,8 @@ class CarbonTrainerEnv:
         my_base_distance_feature = None
         distance_features = {}
 
-        my_cash, opponent_cash = obs.current_player.cash, obs.opponents[0].cash
-        for base_id, base in obs.recrtCenters.items():
+        my_cash, opponent_cash = current_obs.current_player.cash, current_obs.opponents[0].cash
+        for base_id, base in current_obs.recrtCenters.items():
             is_myself = base.player_id == my_player_id
 
             base_x, base_y = base.position.x, base.position.y
@@ -260,7 +278,7 @@ class CarbonTrainerEnv:
 
                 my_base_distance_feature = distance_features[base_id]
 
-        for worker_id, worker in obs.workers.items():
+        for worker_id, worker in current_obs.workers.items():
             is_myself = worker.player_id == my_player_id
 
             available_actions[worker_id] = np.array([1, 1, 1, 1, 1])  # TODO
@@ -279,7 +297,7 @@ class CarbonTrainerEnv:
             worker_carbon_feature[worker_x, worker_y] = worker.carbon
         worker_carbon_feature = np.clip(worker_carbon_feature / self.configuration.maxCellCarbon / 2, -1, 1)
 
-        for tree in obs.trees.values():
+        for tree in current_obs.trees.values():
             tree_feature[tree.position.x, tree.position.y] = tree.age if tree.player_id == my_player_id else -tree.age
         tree_feature /= self.configuration.treeLifespan
 
@@ -299,12 +317,12 @@ class CarbonTrainerEnv:
         dones = {}
         local_obs = {}
         previous_worker_ids = set() if previous_obs is None else set(previous_obs.current_player.worker_ids)
-        worker_ids = set(obs.current_player.worker_ids)
+        worker_ids = set(current_obs.current_player.worker_ids)
         new_worker_ids, death_worker_ids = worker_ids - previous_worker_ids, previous_worker_ids - worker_ids
-        obs = previous_obs if previous_obs is not None else obs
+        obs = previous_obs if previous_obs is not None else current_obs
         total_agents = obs.current_player.recrtCenters + \
                        obs.current_player.workers + \
-                       [obs.workers[id_] for id_ in new_worker_ids]  # 基地 + prev_workers + new_workers
+                       [current_obs.workers[id_] for id_ in new_worker_ids]  # 基地 + prev_workers + new_workers
         for my_agent in total_agents:
             if my_agent.id in death_worker_ids:  # 死亡的agent, 直接赋值为0
                 local_obs[my_agent.id] = np.zeros(self.observation_dim, dtype=np.float32)

@@ -22,24 +22,26 @@ from algorithms.policy import Policy
 
 class RingBuffer:
     """ class that implements a not-yet-full buffer """
+
     def __init__(self, max_size):
         self.max = max_size
         self.data = []
 
     class __Full:
         """ class that implements a full buffer """
+
         def append(self, x):
             """ Append an element overwriting the oldest one. """
             self.data[self.cur] = x
-            self.cur = (self.cur+1) % self.max
+            self.cur = (self.cur + 1) % self.max
 
         def get(self):
             """ return list of elements in correct order """
-            ret = self.data[self.cur:]+self.data[:self.cur]
+            ret = self.data[self.cur:] + self.data[:self.cur]
             return ret
 
         def last(self):
-            return self.data[self.cur-1] if self.cur > 0 else self.data[-1]
+            return self.data[self.cur - 1] if self.cur > 0 else self.data[-1]
 
         def reset(self):
             self.cur = 0
@@ -71,10 +73,11 @@ class TrajectoryBuffer:
         self.n_envs = n_envs
         self.episode_length = episode_length
 
-        self.valid_step_range = {id_: {} for id_ in range(self.n_envs)}
+        self.env_agent_ids = {id_: set() for id_ in range(self.n_envs)}
         self.data = dict()  # eg. key -> env -> agent -> [step1, step2, ...]
 
-    def get_env_data(self, env_id: int, agent_first: bool = True, rollover_agent_ids=None) -> Dict[AnyStr, Dict[AnyStr, List[Any]]]:
+    def get_env_data(self, env_id: int, agent_first: bool = True, rollover_agent_ids=None) -> Dict[
+        AnyStr, Dict[AnyStr, List[Any]]]:
         rollover_agent_ids = set() if rollover_agent_ids is None else set(rollover_agent_ids)
 
         return_value = {}
@@ -92,24 +95,32 @@ class TrajectoryBuffer:
                     env_data[env_id][agent_id].reset()
                     env_data[env_id][agent_id].append(values[-1])
 
+        self.env_agent_ids[env_id].clear()
         for env_data in self.data.values():
             env_data[env_id] = {agent_id: value for agent_id, value in env_data[env_id].items()
                                 if agent_id in rollover_agent_ids}
+            self.env_agent_ids[env_id] = set(env_data[env_id].keys())
 
         return return_value
 
-    def append(self, step, key: str, env_id: int, agent_id: str, value: Any):
+    def append(self, key: str, env_id: int, agent_id: str, value: Any):
         if key not in self.data:
             self.data[key] = {env_id: {} for env_id in range(self.n_envs)}
 
         if agent_id not in self.data[key][env_id]:
-            self.data[key][env_id][agent_id] = RingBuffer(self.episode_length+1)
+            self.data[key][env_id][agent_id] = RingBuffer(self.episode_length + 1)
 
         # 添加数据
         self.data[key][env_id][agent_id].append(value)
+        self.env_agent_ids[env_id].add(agent_id)
+
+    def contains_agent(self, env_id, agent_id: str):
+        return agent_id in self.env_agent_ids[env_id]
 
     def reset(self):
         self.data.clear()
+        for values in self.env_agent_ids.values():
+            values.clear()
 
 
 class CarbonGameRunner:
@@ -128,18 +139,24 @@ class CarbonGameRunner:
         self.actor_max_grad_norm = cfg.main_config.runner.actor_max_grad_norm
         self.critic_max_grad_norm = cfg.main_config.runner.critic_max_grad_norm
 
-        self._env_output = None
+        self._my_env_output = None
         self.trajectory_buffer = TrajectoryBuffer(self.n_threads, self.episode_length)
         self._replay_buffer = ReplayBuffer(cfg.main_config.runner.replay_buffer)
 
         self.policy = Policy(cfg)
 
+        # 下面为selfplay的相关参数
         self.selfplay = True
+        self._opponent_env_output = None
         self.best_model = None
         self.best_model_filename = None
 
     def run(self):
-        self._env_output = self.env.reset(self.selfplay)
+        if self.selfplay:
+            self._my_env_output, self._opponent_env_output = self.env.reset(self.selfplay)
+        else:
+            self._my_env_output = self.env.reset(self.selfplay)
+
         self.trajectory_buffer.reset()
 
         for episode in range(self.episodes):
@@ -168,7 +185,7 @@ class CarbonGameRunner:
                         n_iters = int(np.ceil(len(self._replay_buffer) / batch_size))
                         # train_data = self._replay_buffer.sample_batch(batch_size)  # TODO
                         for i in range(n_iters):
-                            start = i*batch_size
+                            start = i * batch_size
                             end = min(start + batch_size, len(self._replay_buffer))
                             train_data = self._replay_buffer.sample_batch_by_indices(np.arange(start, end))  # TODO
                             train_log = self.train(train_data)
@@ -179,63 +196,74 @@ class CarbonGameRunner:
 
                 self._replay_buffer.reset()
 
-    def collect(self, step) -> Tuple[List[Dict[AnyStr, Dict[AnyStr, List[np.ndarray]]]], List[Dict[AnyStr, float]]]:
-        env_output_t = self._env_output
-        agent_ids_t, obs_t, available_actions_t = zip(*[(output['agent_id'],
-                                                         output['obs'],
-                                                         output['available_actions'])
-                                                        for output in env_output_t])  # S(t)
-
-        flatten_obs_t = [value for env_obs in obs_t for value in env_obs]
-        flatten_obs_tensor_t = torch.from_numpy(np.stack(flatten_obs_t))
-        flatten_available_actions_t = np.concatenate(available_actions_t)
-        policy_output = self.policy.get_actions_values(flatten_obs_tensor_t, flatten_available_actions_t)
-        flatten_action_t, flatten_log_prob_t, flatten_value_t = policy_output  # a(t), V(t)
-
-        env_actions = []
-        c = 0
+    def save_policy_to_trajectory_buffer(self, policy_output: Dict[int, Dict[AnyStr, EasyDict]]):
         for env_id in range(self.n_threads):  # for each env
-            env_action = {}
-            for i, agent_id in enumerate(agent_ids_t[env_id]):
-                cmd_value = flatten_action_t[c].item()
-                c += 1
-                env_action[agent_id] = cmd_value
-            env_actions.append(env_action)
+            for agent_id, agent_value in policy_output[env_id].items():  # for each agent
+                for key, value in agent_value.items():  # S(t), a(t), V(t)
+                    self.trajectory_buffer.append(key, env_id, agent_id, value)
 
-        next_env_output = self.env.step(env_actions)  # a(t) -> r(t), S(t+1), done(t+1)
-        self._env_output = next_env_output  # t+1
+    def collect(self, step) -> Tuple[List[Dict[AnyStr, Dict[AnyStr, List[np.ndarray]]]], List[Dict[AnyStr, float]]]:
+        my_policy_output = self.get_actions_and_values(self._my_env_output)  # 我方策略输出
+        self.save_policy_to_trajectory_buffer(my_policy_output)
 
-        c = 0
+        opponent_policy_output = None  # 对手策略输出
+        if self.selfplay:
+            opponent_policy_output = self.get_actions_and_values(self._opponent_env_output)  # TODO: use best model
+            self.save_policy_to_trajectory_buffer(opponent_policy_output)
+        
+        env_actions = []
+        for env_id in range(self.n_threads):  # for each env
+            action = {agent_id: agent_value.action.item()
+                      for agent_id, agent_value in my_policy_output[env_id].items()}  # agent_id: command value
+
+            if opponent_policy_output is not None:  # 自我对局
+                opponent_action = {agent_id: agent_value.action.item()
+                                   for agent_id, agent_value in opponent_policy_output[env_id].items()}
+                action = [action, opponent_action]
+
+            env_actions.append(action)
+
+        # a(t) -> r(t), S(t+1), done(t+1)
+        if self.selfplay:
+            self._my_env_output, self._opponent_env_output = self.env.step(env_actions)
+        else:
+            self._my_env_output = self.env.step(env_actions)
+
         return_data, collect_log = [], []
-        for env_id, a_env_output_next in enumerate(next_env_output):  # 遍历每个游戏环境,并收集trajectory
+        for env_id in range(self.n_threads):  # 遍历每个游戏环境,并收集trajectory
+            a_env_output_next = self._my_env_output[env_id]
+
             env_reward = a_env_output_next.pop('env_reward')
             a_env_output_next = copy.deepcopy(a_env_output_next)
 
             # 因reset被移动到reserved_agent_id中,
             agent_ids_next = a_env_output_next.pop('reserved_agent_id') if 'reserved_agent_id' in a_env_output_next \
                 else a_env_output_next.pop('agent_id')
-            agent_ids_next_set = set(agent_ids_next)
 
             # 处理t时刻
-            for agent_id, available_actions in zip(agent_ids_t[env_id], available_actions_t[env_id]):
+            for i, agent_id in enumerate(agent_ids_next):
+                if not self.trajectory_buffer.contains_agent(env_id, agent_id):
+                    continue
 
-                if agent_id in agent_ids_next_set:
-                    idx = agent_ids_next.index(agent_id)
-                else:
-                    idx = None  # 说明该agent,在上一步已经结束了(done=True),下面为校验
-                    assert self.trajectory_buffer.data['done'][env_id][agent_id].last() is True
+                self.trajectory_buffer.append('done', env_id, agent_id,
+                                              a_env_output_next['done'][i])  # done(t+1)
+                self.trajectory_buffer.append('reward', env_id, agent_id,
+                                              a_env_output_next['reward'][i])  # r(t)
 
-                if idx is not None:
-                    self.trajectory_buffer.append(step, "obs", env_id, agent_id, flatten_obs_t[c])  # S(t)
-                    self.trajectory_buffer.append(step, "action", env_id, agent_id, flatten_action_t[c])  # a(t)
-                    self.trajectory_buffer.append(step, 'available_actions', env_id, agent_id, available_actions)
-                    self.trajectory_buffer.append(step, "log_prob", env_id, agent_id, flatten_log_prob_t[c])
-                    self.trajectory_buffer.append(step, "value", env_id, agent_id, flatten_value_t[c])  # V(t)
-                    self.trajectory_buffer.append(step, 'done', env_id, agent_id,
-                                                  a_env_output_next['done'][idx])  # done(t+1)
-                    self.trajectory_buffer.append(step, 'reward', env_id, agent_id,
-                                                  a_env_output_next['reward'][idx])  # r(t)
-                c += 1
+            if self.selfplay:
+                opponent_env_output_next = self._opponent_env_output[env_id]
+                opponent_env_output_next = copy.deepcopy(opponent_env_output_next)
+                opponent_agent_ids_next = opponent_env_output_next.pop('reserved_agent_id') if 'reserved_agent_id' in opponent_env_output_next \
+                    else opponent_env_output_next.pop('agent_id')
+
+                for i, agent_id in enumerate(opponent_agent_ids_next):
+                    if not self.trajectory_buffer.contains_agent(env_id, agent_id):
+                        continue
+
+                    self.trajectory_buffer.append('done', env_id, agent_id,
+                                                  opponent_env_output_next['done'][i])  # done(t+1)
+                    self.trajectory_buffer.append('reward', env_id, agent_id,
+                                                  opponent_env_output_next['reward'][i])  # r(t)
 
             if all(a_env_output_next['done']):  # 游戏结束(t=terminal),收集所有的transition序列,并返回
                 transitions = defaultdict(dict)
@@ -256,6 +284,33 @@ class CarbonGameRunner:
                 }))
 
         return return_data, collect_log
+
+    def get_actions_and_values(self, env_output):
+        agent_ids, obs, available_actions = zip(*[(output['agent_id'],
+                                                   output['obs'],
+                                                   output['available_actions'])
+                                                  for output in env_output])
+        flatten_obs = [value for env_obs in obs for value in env_obs]
+        flatten_obs_tensor = torch.from_numpy(np.stack(flatten_obs))
+        flatten_available_actions = np.concatenate(available_actions)
+
+        policy_output = self.policy.get_actions_values(flatten_obs_tensor, flatten_available_actions)
+
+        flatten_action, flatten_log_prob, flatten_value = policy_output  # a(t), V(t)
+
+        output = defaultdict(dict)
+        c = 0
+        for env_id, agent_ids_per_env in enumerate(agent_ids):
+            for agent_id in agent_ids_per_env:
+                output[env_id][agent_id] = EasyDict(dict(
+                    obs=flatten_obs[c],
+                    action=flatten_action[c],
+                    log_prob=flatten_log_prob[c],
+                    value=flatten_value[c],
+                    available_actions=flatten_available_actions[c],
+                ))
+                c += 1
+        return output
 
     def train(self, batch: EasyDict) -> EasyDict:
         log_prob, dist_entropy, value = self.policy.evaluate_actions(batch.obs, batch.action, batch.available_actions)
@@ -346,5 +401,3 @@ class CarbonGameRunner:
     def prep_rollout(self):
         self.policy.actor_model.eval()
         self.policy.critic_model.eval()
-
-
