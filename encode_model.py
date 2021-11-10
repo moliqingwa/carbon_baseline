@@ -6,14 +6,12 @@ from utils import storage
 
 
 if __name__ == "__main__":
-    model_dir = storage.get_model_dir("carbon")
-    status = storage.get_status(model_dir, torch.device("cpu"))
-    actor_model = status['actor_model']
+    actor_state_dict = torch.load(str('./model/actor_best.pth'), map_location = torch.device("cpu"))
 
-    for name, param in actor_model.items():
-        actor_model[name] = param.numpy()
+    for name, param in actor_state_dict.items():
+        actor_state_dict[name] = param.numpy()
 
-    model_byte = base64.b64encode(pickle.dumps(actor_model))
+    model_byte = base64.b64encode(pickle.dumps(actor_state_dict))
     with open("./model/actor.txt", 'wb') as f:
         f.write(model_byte)
     pass
