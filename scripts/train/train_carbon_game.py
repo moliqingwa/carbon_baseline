@@ -21,6 +21,7 @@ def main(cfg):
         envs.append(CarbonTrainerEnv(carbon_env_config))
     env = ParallelEnv(envs)
 
+    # Running dir
     run_dir = Path(__file__).parent / cfg.envs.experient_name
     if not run_dir.exists():
         current_run = "run1"

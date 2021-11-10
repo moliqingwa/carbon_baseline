@@ -6,6 +6,8 @@ from easydict import EasyDict
 import numpy as np
 import torch
 
+from loguru import logger
+
 from utils.utils import to_tensor, flatten
 
 
@@ -48,6 +50,7 @@ class ReplayBuffer(object):
         return EasyDict({key: copy.deepcopy(value[batch_indices]) if self._deepcopy else value[batch_indices]
                          for key, value in self._data.items()})
 
+    @logger.catch
     def append(self, data: Union[List[Dict[AnyStr, Dict[AnyStr, List[np.ndarray]]]], Dict[AnyStr, Dict[AnyStr, List[np.ndarray]]]]):
         if isinstance(data, (list, tuple)):   # list of dict to dict of list
             data = [agent_value for env_value in data for agent_value in env_value.values()]
@@ -82,7 +85,7 @@ class ReplayBuffer(object):
                 buffer[self._current_pos: self._current_pos + batch_size] = value
 
         self._valid_count = min(self._valid_count + batch_size, self.max_size)  # 当前size
-        print(f"Replay Buffer: data position: [{self._current_pos} : {self._valid_count}], size: {batch_size}")
+        # print(f"Replay Buffer: data position: [{self._current_pos} : {self._valid_count}], size: {batch_size}")
         self._current_pos = (self._current_pos + batch_size) % self.max_size  # 当前最新的位置
 
     def count(self) -> int:
