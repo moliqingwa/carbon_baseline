@@ -5,6 +5,7 @@ termtables==0.2.4
 easydict==1.9
 gym==0.21.0
 pytest==6.2.5
+tensorboard==1.14.0
 tensorboardX==1.8
 ipykernel
 jupyterlab
