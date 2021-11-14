@@ -62,6 +62,7 @@ python evaluate.py
 
 ## 结果
 以下图片展示了训练过程中PPO算法的学习效果的部分截图。目前，我们仅选取了一个随机智能体作为对手。为了在赛事中得到较好的名次，选手应该训练出一个更为鲁棒的模型（如设计更好的状态特征、奖励函数、添加部分规则约束、改进算法等）。
+
 ![critic_loss](static_resources/critic_loss.jpg)
 ![policy_loss](static_resources/policy_loss.jpg)
 ![agent_reward_mean](static_resources/agent_reward_mean.jpg)
