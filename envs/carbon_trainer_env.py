@@ -276,7 +276,7 @@ class CarbonTrainerEnv:
         if my_player.id < len(self.previous_commands):
             previous_my_command = self.previous_commands[my_player.id]
             if previous_my_command:
-                is_my_base_recruit = 'recrtCenter' in previous_my_command
+                is_my_base_recruit = my_player.recrtCenters[0].id in previous_my_command
                 for worker_id, worker in previous_my_workers.items():
                     if worker_id in previous_my_command:  # 有移动动作
                         dx, dy = WorkerDirections[WorkerActionsByName[previous_my_command[worker_id]].value].tolist()
