@@ -72,9 +72,9 @@ python evaluate.py
 ## 可视化
 当训练过程中，或训练完成后，可以打开ipython notebook查看。
 ```shell
-jupyter-lab
+jupyter lab
 ```
-jupyter lab成功运行之后，会自动打开浏览器页面，此时选择`test.ipynb`,并选择`carbon` kernel。
+jupyter lab成功运行之后，会自动打开浏览器页面，此时选择`test.ipynb`,并选择`carbon` (或`ipykernel`) kernel。
 依次运行两个cell，可以看到，模型策略 vs 内置random机器人的对局的动画情况。
 
 可以修改你的模型文件位置，观看自己模型的情况。
