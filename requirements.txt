@@ -1,7 +1,9 @@
-torch==1.10.0
-tensorboardX==2.2
-numpy==1.21.3
+torch==1.8.1
+numpy==1.19.5
+matplotlib==3.3.4
 termtables==0.2.4
 easydict==1.9
-timer==0.2.2
-
+gym==0.21.0
+jupyterlab
+pytest==6.2.5
+tensorboardX==1.8

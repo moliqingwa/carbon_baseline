@@ -1,5 +1,6 @@
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union, Any
+from typing import List, Any
 
+import os
 import math
 import random
 
@@ -20,6 +21,7 @@ def set_seed(seed):
 
 def synthesize(array):
     d = OrderedDict()
+    d["median"] = np.median(array)
     d["mean"] = np.mean(array)
     d["std"] = np.std(array)
     d["min"] = np.amin(array)
@@ -87,3 +89,8 @@ def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
     lr = initial_lr - (initial_lr * (epoch / float(total_num_epochs)))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+
+
+def create_folders_if_necessary(path):
+    if not os.path.isdir(str(path)):
+        os.makedirs(path)

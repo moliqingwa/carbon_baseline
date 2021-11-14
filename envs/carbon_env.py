@@ -1,13 +1,5 @@
-import time
-import random
-import envs.rendering as rendering
-import numpy as np
-import math
-from io import StringIO
-from collections import defaultdict
-
-from game.zerosum_env import make, InvalidArgument, Agent
-from game.zerosum_env.core import act_agent
+from zerosum_env import make, InvalidArgument, Agent
+from zerosum_env.core import act_agent
 
 
 class AgentRunner:
@@ -49,38 +41,32 @@ class CarbonEnv:
 
         self._runner = None
 
-        self.self_play = False
         self.my_index = None
         self.opponent_index = None
 
-        if self.self_play:
-            self.players = [None, None]
-        else:
-            self.players = [None, "random"]
+        self.players = [None, "random"]
 
         self.reset(self.players)
 
-        self.pixel_size = 30
-        self.viewer = None
-        self.board_lines = []
+    @property
+    def selfplay(self):
+        return self.opponent_index is not None
 
     def reset(self, players=None):
         players = self.players if players is None else players
-        if self.self_play:
-            assert players == [None, None]
+        if players == [None, None]:  # self play
             self.my_index, self.opponent_index = 0, 1
         else:
             for index, agent in enumerate(players):
                 if agent is None:
                     if self.my_index is not None and self.my_index > 0:
-                        raise InvalidArgument("Only one agent can be marked 'None'")
+                        raise InvalidArgument("Only first agent can be marked 'None' for non self-play mode")
                     self.my_index = index
+            self.opponent_index = None
         self.players = players
         self.env.reset(len(self.players))
         self._runner = AgentRunner(self.env, self.players)
         self._advance()
-        observation = self.env._Environment__get_shared_state(self.my_index).observation
-        return observation
 
     def _advance(self):
         while not self.env.done and self.env.states[self.my_index].status == "INACTIVE":
