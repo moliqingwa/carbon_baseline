@@ -2,13 +2,13 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-from algorithms.model import ActorNet, CriticNet
+from algorithms.model import Model
 
 
 class TestModel:
 
     def test_critic_net(self):
-        critic_net = CriticNet(False, None)
+        critic_net = Model(is_actor=False)
         print(critic_net)
 
         num_agents = 5
@@ -17,7 +17,7 @@ class TestModel:
         for i in range(num_agents):
             obs_vector = torch.randn(8)
             obs_cnn = torch.randn(13, 15, 15)
-            obs = torch.concat([obs_vector, obs_cnn.reshape(-1)])
+            obs = torch.cat([obs_vector, obs_cnn.reshape(-1)])
             agent_obs.append(obs)
         agent_obs = torch.stack(agent_obs)
 
@@ -32,31 +32,25 @@ class TestModel:
             print(loss.item())
 
     def test_actor_net(self):
-        actor_net = ActorNet()
+        actor_net = Model()
         print(actor_net)
 
         num_agents = 10
         action_dim = 5
         target_action = torch.randint(action_dim, (num_agents, ))
-        target = []
-        for action_value in target_action:
-            onehot_action = torch.zeros(action_dim, dtype=torch.float32)
-            onehot_action[action_value.item()] = 1.
-            target.append(onehot_action)
-        target = torch.stack(target)
 
         agent_obs = []
         for i in range(num_agents):
             obs_vector = torch.randn(8)
             obs_cnn = torch.randn(13, 15, 15)
-            obs = torch.concat([obs_vector, obs_cnn.reshape(-1)])
+            obs = torch.cat([obs_vector, obs_cnn.reshape(-1)])
             agent_obs.append(obs)
         agent_obs = torch.stack(agent_obs)
 
         optimizer = optim.AdamW(actor_net.parameters(), lr=0.001)
         for i in range(1000):
             actor_output = actor_net(agent_obs)
-            loss = F.cross_entropy(actor_output, target)
+            loss = F.cross_entropy(actor_output, target_action)
 
             optimizer.zero_grad()
             loss.backward()

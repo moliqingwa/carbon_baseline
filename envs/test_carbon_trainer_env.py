@@ -5,7 +5,8 @@ import numpy as np
 import torch
 
 from envs.carbon_trainer_env import CarbonTrainerEnv
-from algorithms.model import ActorNet
+from algorithms.base_policy import BasePolicy
+from algorithms.model import Model
 
 
 class TestCarbonTrainerEnv:
@@ -29,7 +30,8 @@ class TestCarbonTrainerEnv:
                                                           enumerate(available_actions)))))
                 actions[agent_id] = cmd_value
 
-            env_output = self.env.step(actions)
+            commands = BasePolicy.to_env_commands(actions)
+            env_output = self.env.step(commands)
 
             print(f"===== STEP {i} =====")
             for agent_id, obs, reward, done, info, available_actions in zip(env_output.agent_id,
@@ -49,7 +51,7 @@ class TestCarbonTrainerEnv:
                 break
 
     def test_env_actor_action(self):
-        actor_net = ActorNet()
+        actor_net = Model()
         env_output = self.env.reset([None, "random"])
         for i in range(300):
             obs = torch.from_numpy(np.stack(env_output.obs))
@@ -64,7 +66,8 @@ class TestCarbonTrainerEnv:
                 cmd_value = [i for i in action_index if i in available_action_index][0]  # 选取最大概率的可用动作
                 actions[agent_id] = cmd_value
 
-            env_output = self.env.step(actions)
+            commands = BasePolicy.to_env_commands(actions)
+            env_output = self.env.step(commands)
 
             print(f"===== STEP {i} =====")
             for agent_id, obs, reward, done, info, available_actions in zip(env_output.agent_id,
