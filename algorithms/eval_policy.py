@@ -2,7 +2,6 @@ from typing import Tuple, Dict, OrderedDict
 import copy
 
 import torch
-from torch.distributions import Categorical
 
 from zerosum_env.envs.carbon.helpers import Board, Point
 
@@ -10,6 +9,7 @@ from algorithms.model import Model
 from algorithms.base_policy import BasePolicy
 from envs.obs_parser import ObservationParser
 from utils.utils import to_tensor
+from utils.categorical_masked import CategoricalMasked
 
 
 class EvalPolicy(BasePolicy):
@@ -39,11 +39,10 @@ class EvalPolicy(BasePolicy):
 
         action_logits = self.actor_model(obs)
         if available_actions is not None:
-            available_actions = to_tensor(available_actions).to(**self.tensor_kwargs)
-            action_logits[available_actions == 0] = torch.finfo(torch.float32).min
+            available_actions = to_tensor(available_actions)
 
-        action = action_logits.sort(dim=1, descending=True)[1][:, 0]  # 按照概率值倒排,选择最大概率位置的索引
-        dist = Categorical(logits=action_logits)
+        dist = CategoricalMasked(logits=action_logits, mask=available_actions)
+        action = dist.argmax()
         log_prob = dist.log_prob(action)
 
         action = action.detach().cpu().numpy().flatten()

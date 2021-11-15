@@ -4,11 +4,11 @@ from easydict import EasyDict
 import numpy as np
 import torch
 import torch.optim as optim
-from torch.distributions import Categorical
 import torch.nn.functional as F
 
 from utils.utils import to_tensor, update_linear_schedule, calculate_gard_norm
 from utils.replay_buffer import ReplayBuffer
+from utils.categorical_masked import CategoricalMasked
 
 from algorithms.base_policy import BasePolicy
 
@@ -41,7 +41,7 @@ class LearnerPolicy(BasePolicy):
         self.actor_model.eval()
         self.critic_model.eval()
         self._lr_decay(episode, n_episodes)
-        
+
     def can_sample_trajectory(self):
         return True
 
@@ -59,10 +59,9 @@ class LearnerPolicy(BasePolicy):
 
         action_logits = self.actor_model(obs)
         if available_actions is not None:
-            available_actions = to_tensor(available_actions).to(**self.tensor_kwargs)
-            action_logits[available_actions == 0] = torch.finfo(torch.float32).min
+            available_actions = to_tensor(available_actions)
 
-        dist = Categorical(logits=action_logits)
+        dist = CategoricalMasked(logits=action_logits, mask=available_actions)
         action = dist.sample()
         log_prob = dist.log_prob(action)
 
@@ -112,10 +111,9 @@ class LearnerPolicy(BasePolicy):
 
         action_logits = self.actor_model(obs)
         if available_actions is not None:
-            available_actions = to_tensor(available_actions).to(**self.tensor_kwargs)
-            action_logits[available_actions == 0] = torch.finfo(torch.float32).min
+            available_actions = to_tensor(available_actions)
 
-        dist = Categorical(logits=action_logits)
+        dist = CategoricalMasked(logits=action_logits, mask=available_actions)
         log_prob = dist.log_prob(action)
 
         return log_prob, dist.entropy().mean()
