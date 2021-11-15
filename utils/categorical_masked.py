@@ -3,7 +3,6 @@ from typing import Optional
 import torch
 from torch.distributions.categorical import Categorical
 from torch import einsum
-from einops import reduce
 
 
 class CategoricalMasked(Categorical):
@@ -28,7 +27,7 @@ class CategoricalMasked(Categorical):
         p_log_p = torch.where(self.mask,
                               p_log_p,
                               torch.tensor(0, dtype=p_log_p.dtype, device=p_log_p.device))
-        return -reduce(p_log_p, "b a -> b", "sum", b=self.batch, a=self.nb_action)
+        return -torch.sum(p_log_p, dim=1)
 
     def argmax(self) -> torch.Tensor:
         return self.logits.sort(dim=1, descending=True)[1][:, 0]  # 按照概率值倒排,选择最大概率位置的索引
