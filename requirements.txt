@@ -1,7 +1,6 @@
 torch==1.8.1
 numpy==1.19.5
 matplotlib==3.3.4
-termtables==0.2.4
 easydict==1.9
 gym==0.21.0
 pytest==6.2.5
