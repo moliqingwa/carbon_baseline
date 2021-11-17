@@ -35,7 +35,7 @@ class LeanerPartnerPolicy(LearnerPolicy):
         if paths:
             self.model_path = random.choice(paths)
 
-            state_dict = torch.load(self.model_path)
+            state_dict = torch.load(self.model_path, map_location=self.device)
             self.actor_model.load_state_dict(state_dict['actor'])
             self.actor_model.eval()
 
