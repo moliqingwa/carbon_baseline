@@ -38,7 +38,7 @@ class CarbonGameRunner:
 
         self._env_output = None
         self._trajectory_buffer = TrajectoryBuffer()
-        self._replay_buffer = ReplayBuffer(cfg.main_config.runner.buffer_size)
+        self._replay_buffer = ReplayBuffer(cfg.main_config.runner.buffer_size, cfg.main_config.runner.device)
 
         self.learner_policy = LearnerPolicy(cfg)  # 待训练的策略
 

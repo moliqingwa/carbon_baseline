@@ -32,10 +32,14 @@ class LearnerPolicy(BasePolicy):
         self.target_kl = cfg.main_config.runner.policy.target_kl
         self.actor_max_grad_norm = cfg.main_config.runner.policy.actor_max_grad_norm
         self.critic_max_grad_norm = cfg.main_config.runner.policy.critic_max_grad_norm
+        self.device = cfg.main_config.runner.device
         self.tensor_kwargs = dict(dtype=torch.float32, device=cfg.main_config.runner.device)
 
         self.actor_optimizer = optim.AdamW(self.actor_model.parameters(), lr=self.learning_rate)
         self.critic_optimizer = optim.AdamW(self.critic_model.parameters(), lr=self.learning_rate)
+
+        self.actor_model.to(self.device)
+        self.critic_model.to(self.device)
 
     def policy_reset(self, episode: int, n_episodes: int):
         self.actor_model.eval()
@@ -97,6 +101,9 @@ class LearnerPolicy(BasePolicy):
 
         self.critic_model.load_state_dict(model_dict['critic'], strict=strict)
         self.critic_optimizer.load_state_dict(model_dict['critic_optimizer'])
+
+        self.actor_model.to(self.device)
+        self.critic_model.to(self.device)
 
     def evaluate_actions(self, observation, action, available_actions=None):
         """
