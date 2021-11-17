@@ -15,8 +15,9 @@ class ReplayBuffer(object):
             increase according to the new full data size.
     """
 
-    def __init__(self, max_size: int):
+    def __init__(self, max_size: int, device: torch.device):
         self.max_size = max_size
+        self.device = device
 
         self._build = False
         self._data = {}
@@ -55,7 +56,7 @@ class ReplayBuffer(object):
                         print(f"Enlarge replay buffer size from {self.max_size} to {batch_size}")
                         self.max_size = batch_size
                     buffer = torch.zeros((self.max_size, *value.shape[1:]),
-                                         dtype=torch.float32)
+                                         dtype=torch.float32).to(self.device)
                     buffer[: batch_size] = value
                     self._data[key] = buffer
 
@@ -72,12 +73,12 @@ class ReplayBuffer(object):
                 new_data = {}
                 for key, old_data in self._data.items():
                     new_data[key] = torch.zeros((self.max_size, *old_data.shape[1:]),
-                                                dtype=torch.float32)
+                                                dtype=torch.float32).to(self.device)
                     new_data[key][: self._current_pos] = old_data[self._current_pos]
                 self._data = new_data
 
             for key, buffer in self._data.items():
-                value = to_tensor(data[key], raise_error=True)
+                value = to_tensor(data[key], raise_error=True).to(self.device)
                 buffer[self._current_pos: self._current_pos + batch_size] = value
 
         self._valid_count = min(self._valid_count + batch_size, self.max_size)  # 当前size
