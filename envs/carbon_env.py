@@ -57,6 +57,7 @@ class CarbonEnv:
         if players == [None, None]:  # self play
             self.my_index, self.opponent_index = 0, 1
         else:
+            self.my_index = None
             for index, agent in enumerate(players):
                 if agent is None:
                     if self.my_index is not None and self.my_index > 0:
