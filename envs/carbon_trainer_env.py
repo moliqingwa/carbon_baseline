@@ -53,15 +53,9 @@ class CarbonTrainerEnv:
         The current player's state is in the first position, the opponent's is in the second position.
         """
         if self._env.my_index == 0:  # 当前轮次
-            my_state, opponent_state = self._env.env.steps[-1]
-
-            for key in set(my_state.observation.keys()) - set(opponent_state.observation.keys()):  # 复制公共属性
-                opponent_state.observation[key] = my_state.observation[key]
+            my_state, opponent_state = self._env.get_state(0), self._env.get_state(1)
         else:
-            opponent_state, my_state = self._env.env.steps[-1]
-
-            for key in set(opponent_state.observation.keys()) - set(my_state.observation.keys()):  # 复制公共属性
-                my_state.observation[key] = opponent_state.observation[key]
+            opponent_state, my_state = self._env.get_state(1), self._env.get_state(0)
         return my_state, opponent_state
 
     def reset(self, players: Union[None, List] = None) -> Union[EasyDict, List[EasyDict]]:
@@ -98,7 +92,7 @@ class CarbonTrainerEnv:
 
     def step(self, commands: Tuple[Dict[str, str], List[Dict[str, str]]]):
         if isinstance(commands, dict):
-            commands = [commands, None]
+            commands = [commands, None] if self._env.my_index == 0 else [None, commands]
         self.previous_commands = commands
 
         self._env.step(commands)
@@ -114,6 +108,10 @@ class CarbonTrainerEnv:
             self.previous_opponent_obs = self.current_opponent_obs
             self.current_opponent_obs = Board(opponent_state.observation, self.configuration)
 
+            assert self.current_obs.trees.keys() == self.current_opponent_obs.trees.keys()
+            assert self.current_obs.workers.keys() == self.current_opponent_obs.workers.keys()
+            assert self.current_obs.step == self.current_opponent_obs.step
+            assert self.current_obs.observation['carbon'] == self.current_opponent_obs.observation['carbon']
             opponent_output = self._parse_observation_and_reward(opponent_state, my_state,
                                                                  self.current_opponent_obs, self.previous_opponent_obs)
             return [my_output, opponent_output]
@@ -201,7 +199,7 @@ class CarbonTrainerEnv:
             seize_cost = self.configuration.seizeCost  # 抢树价格
             for tree_id in new_tree_ids:
                 tree = current_trees[tree_id]
-                tree_owner, _ = my_state.observation.trees[tree_id]
+                tree_owner, _ = my_state.observation['trees'][tree_id]
                 if tree.age == 1:  # 种树
                     worker_plant_cost[tree_owner] += plant_cost if is_first_tree else plant_market_price
                 else:  # 抢树
