@@ -148,7 +148,7 @@ class ObservationParser:
                 agent_type: range [0, 1], dim 3, agent类型(one-hot)
                 x: range [0, 1), dim 1, agent x轴位置坐标
                 y: range [0, 1), dim 1, agent y轴位置坐标
-            2) cnn_feature: (CNN特征, dim: 11x15x15)
+            2) cnn_feature: (CNN特征, dim: 13x15x15)
                 carbon_feature: range [0, 1], dim: 1x15x15, 地图碳含量分布
                 base_feature: range [-1, 1], dim: 1x15x15, 转化中心位置分布(我方:+1, 对手:-1)
                 collector_feature: range [-1, 1], dim: 1x15x15, 捕碳员位置分布(我方:+1, 对手:-1)

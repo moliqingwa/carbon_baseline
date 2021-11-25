@@ -55,7 +55,7 @@ class CarbonTrainerEnv:
         if self._env.my_index == 0:  # 当前轮次
             my_state, opponent_state = self._env.get_state(0), self._env.get_state(1)
         else:
-            opponent_state, my_state = self._env.get_state(1), self._env.get_state(0)
+            my_state, opponent_state = self._env.get_state(1), self._env.get_state(0)
         return my_state, opponent_state
 
     def reset(self, players: Union[None, List] = None) -> Union[EasyDict, List[EasyDict]]:
