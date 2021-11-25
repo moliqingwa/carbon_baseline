@@ -55,7 +55,7 @@ class CarbonTrainerEnv:
         if self._env.my_index == 0:  # 当前轮次
             my_state, opponent_state = self._env.get_state(0), self._env.get_state(1)
         else:
-            my_state, opponent_state = self._env.get_state(1), self._env.get_state(0)
+            opponent_state, my_state = self._env.get_state(1), self._env.get_state(0)
         return my_state, opponent_state
 
     def reset(self, players: Union[None, List] = None) -> Union[EasyDict, List[EasyDict]]:
@@ -93,8 +93,6 @@ class CarbonTrainerEnv:
     def step(self, commands: Tuple[Dict[str, str], List[Dict[str, str]]]):
         if isinstance(commands, dict):
             commands = [commands, None] if self._env.my_index == 0 else [None, commands]
-        elif self._env.my_index == 1:  # player 0 放在前面
-            commands = [commands[1], commands[0]]
         self.previous_commands = commands
 
         self._env.step(commands)
