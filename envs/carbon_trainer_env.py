@@ -93,6 +93,8 @@ class CarbonTrainerEnv:
     def step(self, commands: Tuple[Dict[str, str], List[Dict[str, str]]]):
         if isinstance(commands, dict):
             commands = [commands, None] if self._env.my_index == 0 else [None, commands]
+        elif self._env.my_index == 1:
+            commands = [commands[1], commands[0]]
         self.previous_commands = commands
 
         self._env.step(commands)
