@@ -137,7 +137,7 @@ class CarbonGameRunner:
         env_outputs = self._env_output if self.selfplay else [self._env_output]  # policy first, then env
 
         policy_outputs = []
-        for policy_id, env_output in enumerate(env_outputs):
+        for policy_id, env_output in enumerate(env_outputs):  # 每个选手
             current_policy = self.policies[policy_id]
             policy_output = self.policy_actions_values(current_policy, env_output)  # 策略输出结果
 
@@ -235,9 +235,7 @@ class CarbonGameRunner:
         :param env_output: (List[Dict[str, Any]]) environment output related to the current policy
         :return: policy_output: (Dict[int, Dict[str, EasyDict]]) policy output for each environments and agents
         """
-        agent_ids, obs, available_actions = zip(*[(output.get('reserved_agent_id', output['agent_id']),
-                                                   output.get('reserved_obs', output['obs']),
-                                                   output.get('reserved_available_actions', output['available_actions']))
+        agent_ids, obs, available_actions = zip(*[(output['agent_id'], output['obs'], output['available_actions'])
                                                   for output in env_output])
         flatten_obs = [value for env_obs in obs for value in env_obs]
         flatten_obs_tensor = torch.from_numpy(np.stack(flatten_obs))
